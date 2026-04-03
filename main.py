@@ -1,23 +1,18 @@
 import os
 import threading
-import time
-import lyricsgenius
+import requests
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
-# --- CONFIGURACIÓN DE APIS ---
+# ¡SOLO NECESITAMOS TELEGRAM! Cero tokens de Genius.
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_BOT_TOKEN")
-TOKEN_GENIUS = os.getenv("GENIUS_ACCESS_TOKEN")
-
-# Inicializamos Genius (con timeout para que no se quede pegado)
-genius = lyricsgenius.Genius(TOKEN_GENIUS, timeout=15, retries=3)
 
 # --- SERVIDOR WEB PARA RENDER ---
 app = Flask('')
 @app.route('/')
 def home(): 
-    return "Bot de Lyrics URU está Vivo!"
+    return "Bot de Letras Libre y Activo!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -27,106 +22,103 @@ def run_web_server():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "¡Qué más, Gianfi! Soy tu bot de letras y significados.\n\n"
-        "Dime el nombre de una canción o artista y te la busco al toque."
+        "¡Qué más! Soy tu bot de letras ultrarrápido.\n\n"
+        "Dime el nombre de la canción o el artista."
     )
 
 async def buscar_cancion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text
-    espera = await update.message.reply_text(f"🔍 Buscando '{query}' en la base de datos...")
+    espera = await update.message.reply_text(f"🔍 Buscando '{query}' en la base de datos libre...")
     
     try:
-        # Buscamos 5 opciones para que elijas la correcta
-        resultados = genius.search_songs(query, per_page=5)
+        # Usamos LRCLIB, sin restricciones y muy rápido
+        url = f"https://lrclib.net/api/search?q={query}"
+        respuesta = requests.get(url).json()
         
-        if not resultados or not resultados['hits']:
-            await espera.edit_text("No encontré nada con ese nombre. Prueba escribiendo 'Artista Canción'.")
+        if not respuesta:
+            await espera.edit_text("No encontré nada. Intenta escribir 'Artista - Canción'.")
             return
 
         botones = []
-        for hit in resultados['hits']:
-            song = hit['result']
-            # Limitamos el texto del botón para que Telegram no dé error
-            label = f"{song['title']} - {song['primary_artist']['name']}"[:60]
-            botones.append([InlineKeyboardButton(label, callback_data=f"ly_{song['id']}")])
+        # Tomamos los primeros 5 resultados que sí tengan letra
+        for song in respuesta[:5]:
+            if song.get('plainLyrics'):
+                # Reducimos el nombre para que el botón no explote
+                label = f"{song['trackName']} - {song['artistName']}"[:60]
+                botones.append([InlineKeyboardButton(label, callback_data=f"ly_{song['id']}")])
         
+        if not botones:
+            await espera.edit_text("Encontré la canción, pero no tiene la letra registrada todavía. 😕")
+            return
+
         markup = InlineKeyboardMarkup(botones)
-        await espera.edit_text("Encontré estas opciones. Elige la que buscas:", reply_markup=markup)
+        await espera.edit_text("¡Listo! Elige tu canción:", reply_markup=markup)
         
     except Exception as e:
-        print(f"Error en búsqueda: {e}")
-        await espera.edit_text("Hubo un problema al conectar con Genius. Intenta de nuevo.")
+        print(f"Error de conexión: {e}")
+        await espera.edit_text("Hubo un problema de conexión. Intenta de nuevo.")
 
 async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     
-    # IMPORTANTE: Esto quita el relojito de carga del botón de inmediato
+    # Fundamental para destrabar el botón al instante
     await query.answer()
 
-    # CASO 1: El usuario eligió una canción para ver la letra
+    # CASO 1: Obtener letra
     if data.startswith("ly_"):
         song_id = data.split("_")[1]
-        await query.edit_message_text("⏳ Cargando letra... esto puede tardar unos segundos.")
+        await query.edit_message_text("⏳ Descargando letra...")
         
         try:
-            # Obtenemos la canción y la letra
-            song = genius.song(song_id)['song']
-            lyrics = genius.lyrics(song_id=song_id)
+            url = f"https://lrclib.net/api/get/{song_id}"
+            cancion = requests.get(url).json()
             
-            if not lyrics:
-                await query.edit_message_text("No pude encontrar la letra detallada para esta canción. 😕")
-                return
-
-            # Limpieza básica: Quitamos el 'Embed' y otros textos que Genius mete al final
-            lyrics_limpia = lyrics.split('Embed')[0]
+            titulo = cancion.get('trackName', 'Desconocido')
+            artista = cancion.get('artistName', 'Desconocido')
+            letra = cancion.get('plainLyrics', 'Letra no disponible.')
             
-            # Telegram solo permite 4096 caracteres. Cortamos a 3800 por seguridad.
-            encabezado = f"🎵 {song['full_title']}\n\n"
-            cuerpo = lyrics_limpia[:3800]
-            texto_final = encabezado + cuerpo
+            encabezado = f"🎵 {titulo} - {artista}\n\n"
+            texto_final = encabezado + letra[:3800] # Evitamos el límite de Telegram
             
-            # Botón para pedir el significado
             btns = [[InlineKeyboardButton("Analizar Significado (IA) 🧠", callback_data=f"mn_{song_id}")]]
             
-            # NO usamos parse_mode="Markdown" porque los símbolos de las letras rompen el bot
             await query.edit_message_text(texto_final, reply_markup=InlineKeyboardMarkup(btns))
             
         except Exception as e:
             print(f"Error cargando letra: {e}")
-            await query.edit_message_text("❌ Error al cargar la letra. Intenta con otra de las opciones.")
+            await query.edit_message_text("❌ Error al cargar la letra.")
 
-    # CASO 2: El usuario quiere el significado (IA)
+    # CASO 2: Significado de la canción
     elif data.startswith("mn_"):
         song_id = data.split("_")[1]
-        song = genius.song(song_id)['song']
+        await query.message.reply_text("🧠 Generando análisis...")
         
-        await query.message.reply_text(f"🧠 Analizando el significado de '{song['title']}'...")
-        
-        # Simulación de análisis (puedes conectar Gemini aquí luego)
-        analisis = (
-            f"La canción *{song['title']}* de *{song['primary_artist']['name']}* es una obra que "
-            "mezcla metáforas sobre la vida cotidiana con sentimientos profundos. "
-            "Según el contexto, busca transmitir una sensación de libertad y reflexión personal. "
-            "Es una de las piezas más comentadas por su lírica única."
-        )
-        
-        await query.message.reply_text(f"✨ *Análisis de IA:*\n\n{analisis}", parse_mode="Markdown")
+        try:
+            url = f"https://lrclib.net/api/get/{song_id}"
+            cancion = requests.get(url).json()
+            titulo = cancion.get('trackName', 'el tema')
+            artista = cancion.get('artistName', 'el artista')
+            
+            # Significado simulado de IA 
+            analisis = (
+                f"*{titulo}* de *{artista}* es una canción que conecta directamente con las emociones de sus oyentes. "
+                "La lírica suele apuntar a vivencias personales, relaciones o críticas sociales, dependiendo del estilo "
+                "del álbum. La estructura del tema está diseñada para dejar un mensaje claro entre sus versos."
+            )
+            
+            await query.message.reply_text(f"✨ *Análisis de IA:*\n\n{analisis}", parse_mode="Markdown")
+        except:
+            await query.message.reply_text("❌ Ocurrió un error al analizar el tema.")
 
-# --- ARRANQUE DEL SISTEMA ---
-
+# --- ARRANQUE ---
 if __name__ == '__main__':
-    # 1. Iniciamos el servidor web en un hilo aparte
     threading.Thread(target=run_web_server, daemon=True).start()
-    
-    # 2. Configuramos el bot de Telegram
     bot_app = Application.builder().token(TOKEN_TELEGRAM).build()
     
-    # Comandos y mensajes
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, buscar_cancion))
     bot_app.add_handler(CallbackQueryHandler(manejar_botones))
     
-    # 3. Encendemos el bot
-    print("Bot de Lyrics iniciado correctamente...")
+    print("Bot de Lyrics Iniciado con Éxito...")
     bot_app.run_polling()
