@@ -1,6 +1,7 @@
 import os
 import threading
 import requests
+import re
 from bs4 import BeautifulSoup
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,50 +13,63 @@ TOKEN_TELEGRAM = os.getenv("TELEGRAM_BOT_TOKEN")
 app = Flask('')
 @app.route('/')
 def home(): 
-    return "Bot de Lyrics + Letras.com Activo!"
+    return "Bot de Lyrics URU + Letras.com Activo!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- EL RASTREADOR DE LETRAS.COM (Versión 2.0 Bilingüe) ---
+# --- EL RASTREADOR DE LETRAS.COM (Versión 3.1 - HTML Fix) ---
+
+def limpiar_para_url(texto):
+    # 1. Quita todo lo que esté entre paréntesis o corchetes (ej: "(Remix)")
+    texto = re.sub(r'\(.*?\)|\[.*?\]', '', texto)
+    # 2. Quita signos de puntuación raros, apóstrofes, comas...
+    texto = re.sub(r'[^\w\s]', '', texto)
+    # 3. Cambia espacios por guiones y quita espacios dobles
+    texto = re.sub(r'\s+', '-', texto.strip().lower())
+    return texto
+
 def extraer_significado_letras(artista, cancion):
     try:
-        # Formateo de URL (Letras.com usa minúsculas y guiones)
-        art_fmt = artista.lower().replace(" ", "-").replace("'", "")
-        can_fmt = cancion.lower().replace(" ", "-").replace("'", "")
+        # Formateo limpio de URL
+        art_fmt = limpiar_para_url(artista)
+        can_fmt = limpiar_para_url(cancion)
         
-        # Apuntamos directo a la pestaña de significado
-        url = f"https://www.letras.com/{art_fmt}/{can_fmt}/significado/"
+        # Dos opciones de búsqueda (¡Con el .html que descubriste!)
+        url_significado = f"https://www.letras.com/{art_fmt}/{can_fmt}/significado.html"
+        url_principal = f"https://www.letras.com/{art_fmt}/{can_fmt}/"
         
-        # Disfraz para que Cloudflare no nos bloquee y pidiendo preferencia en español
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
         }
-        res = requests.get(url, headers=headers, timeout=10)
+        
+        # Intento 1: Vamos directo a la pestaña de significado usando .html
+        res = requests.get(url_significado, headers=headers, timeout=10)
+        
+        # Intento 2: Si da 404, buscamos en la página principal
+        if res.status_code == 404:
+            res = requests.get(url_principal, headers=headers, timeout=10)
         
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             significado_texto = ""
             
-            # Buscamos títulos que contengan significado, meaning o el nombre de la canción
+            # Buscamos títulos que contengan significado, meaning o el nombre
             titulos = soup.find_all(['h1', 'h2', 'h3', 'h4'])
             for tag in titulos:
                 texto_tag = tag.text.lower()
                 if 'significado' in texto_tag or 'meaning' in texto_tag or cancion.lower() in texto_tag:
-                    # Encontramos el título. Ahora sacamos todos los párrafos (<p>) que le siguen
                     hermanos = tag.find_next_siblings(['p', 'div'])
                     for hermano in hermanos:
                         texto_limpio = hermano.text.strip()
-                        # Solo agarramos bloques de texto largos (evita botones o publicidad)
                         if len(texto_limpio) > 40:
                             significado_texto += texto_limpio + "\n\n"
-                    
                     if significado_texto:
-                        break # Ya encontramos el texto, salimos del ciclo
+                        break
 
-            # Plan B: Si no había un título claro, buscamos párrafos largos en la página
+            # Plan B: Párrafos largos si no hay un título claro
             if not significado_texto:
                 parrafos = soup.find_all('p')
                 for p in parrafos:
@@ -65,9 +79,12 @@ def extraer_significado_letras(artista, cancion):
             if significado_texto:
                 return significado_texto[:3800].strip()
             else:
-                return "Llegué a la página, pero la estructura de Letras.com no me dejó raspar el texto exacto. 🚧"
+                return "Pude entrar a la página de Letras.com, pero los editores no han escrito un significado para esta canción. 🚧"
+        elif res.status_code == 404:
+            return f"Error 404. Letras.com no tiene esta canción registrada bajo el nombre '{cancion}' de '{artista}'."
         else:
-            return f"Letras.com devolvió un error (Código {res.status_code}). Puede que esta canción no tenga significado publicado."
+            return f"Error {res.status_code}. Letras.com bloqueó la conexión temporalmente."
+            
     except Exception as e:
         return f"Hubo un error técnico raspando la web: {e}"
 
@@ -86,7 +103,6 @@ async def buscar_cancion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     espera = await update.message.reply_text("🔍 Buscando en LRCLIB...")
     
     try:
-        # Búsqueda ultra rápida con LRCLIB
         respuesta = requests.get(f"https://lrclib.net/api/search?q={query}").json()
         if not respuesta:
             await espera.edit_text("No encontré nada. Intenta escribir 'Artista - Canción'.")
@@ -111,7 +127,6 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     
-    # Fundamental: quita el relojito de carga al instante
     await query.answer()
 
     if data.startswith("ly_"):
@@ -125,8 +140,6 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
             letra = cancion.get('plainLyrics', 'No disponible.')
             
             texto_final = f"🎵 {titulo} - {artista}\n\n{letra[:3800]}"
-            
-            # Botón para buscar el significado en Letras.com
             btns = [[InlineKeyboardButton("Buscar Significado en Letras.com 🔎", callback_data=f"mn_{song_id}")]]
             
             await query.edit_message_text(texto_final, reply_markup=InlineKeyboardMarkup(btns))
@@ -143,9 +156,7 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
             artista = cancion.get('artistName', '')
             titulo = cancion.get('trackName', '')
             
-            # Llamamos a nuestra función V2.0 raspa-páginas
             significado = extraer_significado_letras(artista, titulo)
-            
             await query.message.reply_text(f"✨ *Desde Letras.com:*\n\n{significado}", parse_mode="Markdown")
         except Exception as e:
             print(f"Error sacando significado: {e}")
@@ -153,14 +164,10 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- ARRANQUE DEL SISTEMA ---
 if __name__ == '__main__':
-    # Arranca Flask en segundo plano
     threading.Thread(target=run_web_server, daemon=True).start()
-    
-    # Enciende el bot
     bot_app = Application.builder().token(TOKEN_TELEGRAM).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, buscar_cancion))
     bot_app.add_handler(CallbackQueryHandler(manejar_botones))
-    
     print("Bot de Lyrics y Significados Iniciado con Éxito...")
     bot_app.run_polling()
