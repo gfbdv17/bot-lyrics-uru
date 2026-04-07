@@ -1,124 +1,124 @@
 import os
 import threading
 import requests
+from bs4 import BeautifulSoup
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
-# ¡SOLO NECESITAMOS TELEGRAM! Cero tokens de Genius.
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# --- SERVIDOR WEB PARA RENDER ---
+# --- SERVIDOR WEB ---
 app = Flask('')
 @app.route('/')
 def home(): 
-    return "Bot de Letras Libre y Activo!"
+    return "Bot de Lyrics + Letras.com Activo!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- FUNCIONES DEL BOT ---
+# --- EL RASTREADOR DE LETRAS.COM ---
+def extraer_significado_letras(artista, cancion):
+    try:
+        # Letras.com usa URLs con guiones en vez de espacios
+        art_fmt = artista.lower().replace(" ", "-").replace("'", "")
+        can_fmt = cancion.lower().replace(" ", "-").replace("'", "")
+        url = f"https://www.letras.com/{art_fmt}/{can_fmt}/"
+        
+        # Nos disfrazamos de navegador para que no nos bloqueen de inmediato
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        res = requests.get(url, headers=headers, timeout=10)
+        
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            significado = ""
+            
+            # Buscamos en la página web algún subtítulo que diga "Significado"
+            for tag in soup.find_all(['h2', 'h3']):
+                if tag.text and 'significado' in tag.text.lower():
+                    # Si lo encontramos, nos robamos el bloque de texto que le sigue
+                    cuerpo = tag.find_next_sibling('div')
+                    if cuerpo:
+                        significado = cuerpo.text.strip()
+                        break
+            
+            if significado:
+                return significado[:3800]
+            else:
+                return f"Revisé Letras.com a fondo, pero los editores no le han escrito un significado oficial a '{cancion}'."
+        else:
+            return "No pude encontrar la página exacta de esta canción en Letras.com."
+    except Exception as e:
+        return "Hubo un error raspando Letras.com. (A veces sus servidores bloquean a los bots 🚧)."
 
+# --- LÓGICA DE TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "¡Qué más! Soy tu bot de letras ultrarrápido.\n\n"
-        "Dime el nombre de la canción o el artista."
-    )
+    await update.message.reply_text("¡Epa! Soy tu bot de Letras y ahora busco significados reales en Letras.com.\n\nDime la canción.")
 
 async def buscar_cancion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text
-    espera = await update.message.reply_text(f"🔍 Buscando '{query}' en la base de datos libre...")
+    espera = await update.message.reply_text("🔍 Buscando...")
     
     try:
-        # Usamos LRCLIB, sin restricciones y muy rápido
-        url = f"https://lrclib.net/api/search?q={query}"
-        respuesta = requests.get(url).json()
-        
+        # Seguimos usando LRCLIB para la búsqueda porque no falla nunca
+        respuesta = requests.get(f"https://lrclib.net/api/search?q={query}").json()
         if not respuesta:
-            await espera.edit_text("No encontré nada. Intenta escribir 'Artista - Canción'.")
+            await espera.edit_text("No encontré nada. Intenta 'Artista - Canción'.")
             return
 
         botones = []
-        # Tomamos los primeros 5 resultados que sí tengan letra
         for song in respuesta[:5]:
             if song.get('plainLyrics'):
-                # Reducimos el nombre para que el botón no explote
                 label = f"{song['trackName']} - {song['artistName']}"[:60]
                 botones.append([InlineKeyboardButton(label, callback_data=f"ly_{song['id']}")])
         
         if not botones:
-            await espera.edit_text("Encontré la canción, pero no tiene la letra registrada todavía. 😕")
+            await espera.edit_text("La canción no tiene letra registrada.")
             return
 
-        markup = InlineKeyboardMarkup(botones)
-        await espera.edit_text("¡Listo! Elige tu canción:", reply_markup=markup)
-        
-    except Exception as e:
-        print(f"Error de conexión: {e}")
-        await espera.edit_text("Hubo un problema de conexión. Intenta de nuevo.")
+        await espera.edit_text("Elige tu canción:", reply_markup=InlineKeyboardMarkup(botones))
+    except:
+        await espera.edit_text("Error de conexión.")
 
 async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
-    
-    # Fundamental para destrabar el botón al instante
     await query.answer()
 
-    # CASO 1: Obtener letra
     if data.startswith("ly_"):
         song_id = data.split("_")[1]
         await query.edit_message_text("⏳ Descargando letra...")
-        
         try:
-            url = f"https://lrclib.net/api/get/{song_id}"
-            cancion = requests.get(url).json()
-            
+            cancion = requests.get(f"https://lrclib.net/api/get/{song_id}").json()
             titulo = cancion.get('trackName', 'Desconocido')
             artista = cancion.get('artistName', 'Desconocido')
-            letra = cancion.get('plainLyrics', 'Letra no disponible.')
+            letra = cancion.get('plainLyrics', 'No disponible.')
             
-            encabezado = f"🎵 {titulo} - {artista}\n\n"
-            texto_final = encabezado + letra[:3800] # Evitamos el límite de Telegram
-            
-            btns = [[InlineKeyboardButton("Analizar Significado (IA) 🧠", callback_data=f"mn_{song_id}")]]
-            
+            texto_final = f"🎵 {titulo} - {artista}\n\n{letra[:3800]}"
+            btns = [[InlineKeyboardButton("Buscar Significado en Letras.com 🔎", callback_data=f"mn_{song_id}")]]
             await query.edit_message_text(texto_final, reply_markup=InlineKeyboardMarkup(btns))
-            
-        except Exception as e:
-            print(f"Error cargando letra: {e}")
-            await query.edit_message_text("❌ Error al cargar la letra.")
+        except:
+            await query.edit_message_text("❌ Error al cargar letra.")
 
-    # CASO 2: Significado de la canción
     elif data.startswith("mn_"):
         song_id = data.split("_")[1]
-        await query.message.reply_text("🧠 Generando análisis...")
-        
+        await query.message.reply_text("🔎 Viajando a Letras.com para extraer el significado...")
         try:
-            url = f"https://lrclib.net/api/get/{song_id}"
-            cancion = requests.get(url).json()
-            titulo = cancion.get('trackName', 'el tema')
-            artista = cancion.get('artistName', 'el artista')
+            cancion = requests.get(f"https://lrclib.net/api/get/{song_id}").json()
+            artista = cancion.get('artistName', '')
+            titulo = cancion.get('trackName', '')
             
-            # Significado simulado de IA 
-            analisis = (
-                f"*{titulo}* de *{artista}* es una canción que conecta directamente con las emociones de sus oyentes. "
-                "La lírica suele apuntar a vivencias personales, relaciones o críticas sociales, dependiendo del estilo "
-                "del álbum. La estructura del tema está diseñada para dejar un mensaje claro entre sus versos."
-            )
-            
-            await query.message.reply_text(f"✨ *Análisis de IA:*\n\n{analisis}", parse_mode="Markdown")
-        except:
-            await query.message.reply_text("❌ Ocurrió un error al analizar el tema.")
+            # Llamamos a nuestra función raspa-páginas
+            significado = extraer_significado_letras(artista, titulo)
+            await query.message.reply_text(f"✨ *Desde Letras.com:*\n\n{significado}", parse_mode="Markdown")
+        except Exception as e:
+            await query.message.reply_text("❌ Ocurrió un error consultando Letras.com.")
 
-# --- ARRANQUE ---
 if __name__ == '__main__':
     threading.Thread(target=run_web_server, daemon=True).start()
     bot_app = Application.builder().token(TOKEN_TELEGRAM).build()
-    
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, buscar_cancion))
     bot_app.add_handler(CallbackQueryHandler(manejar_botones))
-    
-    print("Bot de Lyrics Iniciado con Éxito...")
     bot_app.run_polling()
