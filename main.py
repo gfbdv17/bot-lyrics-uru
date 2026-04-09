@@ -13,7 +13,7 @@ TOKEN_TELEGRAM = os.getenv("TELEGRAM_BOT_TOKEN")
 app = Flask('')
 @app.route('/')
 def home(): 
-    return "Bot de Lyrics URU + Letras.com Activo!"
+    return "Bot de Lyrics con Diseño Premium Activo!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -22,21 +22,16 @@ def run_web_server():
 # --- EL RASTREADOR DE LETRAS.COM (Versión 3.1 - HTML Fix) ---
 
 def limpiar_para_url(texto):
-    # 1. Quita todo lo que esté entre paréntesis o corchetes (ej: "(Remix)")
     texto = re.sub(r'\(.*?\)|\[.*?\]', '', texto)
-    # 2. Quita signos de puntuación raros, apóstrofes, comas...
     texto = re.sub(r'[^\w\s]', '', texto)
-    # 3. Cambia espacios por guiones y quita espacios dobles
     texto = re.sub(r'\s+', '-', texto.strip().lower())
     return texto
 
 def extraer_significado_letras(artista, cancion):
     try:
-        # Formateo limpio de URL
         art_fmt = limpiar_para_url(artista)
         can_fmt = limpiar_para_url(cancion)
         
-        # Dos opciones de búsqueda (¡Con el .html que descubriste!)
         url_significado = f"https://www.letras.com/{art_fmt}/{can_fmt}/significado.html"
         url_principal = f"https://www.letras.com/{art_fmt}/{can_fmt}/"
         
@@ -45,10 +40,8 @@ def extraer_significado_letras(artista, cancion):
             'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
         }
         
-        # Intento 1: Vamos directo a la pestaña de significado usando .html
         res = requests.get(url_significado, headers=headers, timeout=10)
         
-        # Intento 2: Si da 404, buscamos en la página principal
         if res.status_code == 404:
             res = requests.get(url_principal, headers=headers, timeout=10)
         
@@ -56,7 +49,6 @@ def extraer_significado_letras(artista, cancion):
             soup = BeautifulSoup(res.text, 'html.parser')
             significado_texto = ""
             
-            # Buscamos títulos que contengan significado, meaning o el nombre
             titulos = soup.find_all(['h1', 'h2', 'h3', 'h4'])
             for tag in titulos:
                 texto_tag = tag.text.lower()
@@ -69,7 +61,6 @@ def extraer_significado_letras(artista, cancion):
                     if significado_texto:
                         break
 
-            # Plan B: Párrafos largos si no hay un título claro
             if not significado_texto:
                 parrafos = soup.find_all('p')
                 for p in parrafos:
@@ -79,11 +70,11 @@ def extraer_significado_letras(artista, cancion):
             if significado_texto:
                 return significado_texto[:3800].strip()
             else:
-                return "Pude entrar a la página de Letras.com, pero los editores no han escrito un significado para esta canción. 🚧"
+                return "Pude entrar a la página, pero no hay un significado redactado para esta canción. 🚧"
         elif res.status_code == 404:
-            return f"Error 404. Letras.com no tiene esta canción registrada bajo el nombre '{cancion}' de '{artista}'."
+            return f"Error 404. Letras.com no tiene un análisis para '{cancion}'."
         else:
-            return f"Error {res.status_code}. Letras.com bloqueó la conexión temporalmente."
+            return f"Error {res.status_code}. Conexión bloqueada temporalmente."
             
     except Exception as e:
         return f"Hubo un error técnico raspando la web: {e}"
@@ -91,16 +82,23 @@ def extraer_significado_letras(artista, cancion):
 # --- LÓGICA DE TELEGRAM ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nombre = update.effective_user.first_name
+    
+    # Diseño Premium usando HTML y líneas
     mensaje = (
-        "¡Bienvenido al lyrics bot hecho por @JoshHSmith! 🎵\n\n"
-        "Extrae las letras y el significado de las canciones que quieras.\n\n"
-        "🔍 Solo envíame el nombre de la canción o el artista para empezar."
+        f"¡Hola <b>{nombre}</b>! Bienvenido al bot 🎵\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Lyrics & Meaning Hub</b> es tu herramienta definitiva creada por @JoshHSmith. "
+        "Busca cualquier canción para obtener su letra completa y extraer el análisis profundo "
+        "directamente desde Letras.com.\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔍 <i>Escribe el nombre de un artista o canción para empezar.</i>"
     )
-    await update.message.reply_text(mensaje)
+    await update.message.reply_text(mensaje, parse_mode="HTML")
 
 async def buscar_cancion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text
-    espera = await update.message.reply_text("🔍 Buscando en LRCLIB...")
+    espera = await update.message.reply_text("⏳ <i>Buscando en la base de datos...</i>", parse_mode="HTML")
     
     try:
         respuesta = requests.get(f"https://lrclib.net/api/search?q={query}").json()
@@ -109,16 +107,25 @@ async def buscar_cancion(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         botones = []
-        for song in respuesta[:5]:
+        paleta = ['🔴', '🔵', '🟢', '🟡', '🟣', '🟠', '🎸', '🎹', '🎤', '🎧']
+        
+        for i, song in enumerate(respuesta[:10]):
             if song.get('plainLyrics'):
-                label = f"{song['trackName']} - {song['artistName']}"[:60]
+                color = paleta[i % len(paleta)]
+                label = f"{color} {song['trackName']} - {song['artistName']}"[:60]
                 botones.append([InlineKeyboardButton(label, callback_data=f"ly_{song['id']}")])
         
         if not botones:
             await espera.edit_text("Encontré la canción pero no tiene letra disponible. 😕")
             return
 
-        await espera.edit_text("¡Listo! Elige tu canción:", reply_markup=InlineKeyboardMarkup(botones))
+        # Menú de selección con estética
+        texto_menu = (
+            "<b>Resultados Encontrados</b> 💿\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Elige la pista correcta de la lista para ver la letra:"
+        )
+        await espera.edit_text(texto_menu, reply_markup=InlineKeyboardMarkup(botones), parse_mode="HTML")
     except Exception as e:
         print(f"Error: {e}")
         await espera.edit_text("Hubo un error de conexión con la base de datos.")
@@ -131,7 +138,7 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("ly_"):
         song_id = data.split("_")[1]
-        await query.edit_message_text("⏳ Descargando letra...")
+        await query.edit_message_text("⏳ <i>Descargando letra...</i>", parse_mode="HTML")
         
         try:
             cancion = requests.get(f"https://lrclib.net/api/get/{song_id}").json()
@@ -139,17 +146,30 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
             artista = cancion.get('artistName', 'Desconocido')
             letra = cancion.get('plainLyrics', 'No disponible.')
             
-            texto_final = f"🎵 {titulo} - {artista}\n\n{letra[:3800]}"
-            btns = [[InlineKeyboardButton("Buscar Significado en Letras.com 🔎", callback_data=f"mn_{song_id}")]]
+            # Formato tipo tarjeta de Spotify
+            texto_final = (
+                f"🎵 <b>{titulo}</b>\n"
+                f"👤 <b>{artista}</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{letra[:3600]}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "<i>¿Qué inspiró esta canción? Descúbrelo abajo 👇</i>"
+            )
             
-            await query.edit_message_text(texto_final, reply_markup=InlineKeyboardMarkup(btns))
+            # Botón de significado con formato llamativo y un botón de cierre
+            btns = [
+                [InlineKeyboardButton("🔥 Extraer Significado (Letras.com) 🔥", callback_data=f"mn_{song_id}")],
+                [InlineKeyboardButton("🔍 Buscar otra canción", callback_data="nueva_busqueda")]
+            ]
+            
+            await query.edit_message_text(texto_final, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
         except Exception as e:
             print(f"Error cargando letra: {e}")
             await query.edit_message_text("❌ Error al cargar la letra completa.")
 
     elif data.startswith("mn_"):
         song_id = data.split("_")[1]
-        await query.message.reply_text("🔎 Viajando a Letras.com para extraer el significado...")
+        await query.edit_message_text("🔎 <i>Viajando a Letras.com...</i>", parse_mode="HTML")
         
         try:
             cancion = requests.get(f"https://lrclib.net/api/get/{song_id}").json()
@@ -157,10 +177,24 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
             titulo = cancion.get('trackName', '')
             
             significado = extraer_significado_letras(artista, titulo)
-            await query.message.reply_text(f"✨ *Desde Letras.com:*\n\n{significado}", parse_mode="Markdown")
+            
+            # Resultado final con HTML
+            texto_significado = (
+                f"🧠 <b>Análisis de: {titulo}</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{significado}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "<i>Fuente: Letras.com</i>"
+            )
+            
+            await query.edit_message_text(texto_significado, parse_mode="HTML")
         except Exception as e:
             print(f"Error sacando significado: {e}")
-            await query.message.reply_text("❌ Ocurrió un error consultando la página de Letras.com.")
+            await query.edit_message_text("❌ Ocurrió un error consultando la página.")
+
+    # Si el usuario presiona "Buscar otra canción"
+    elif data == "nueva_busqueda":
+        await query.edit_message_text("¡Listo! Escribe el nombre de otra canción para empezar de nuevo.")
 
 # --- ARRANQUE DEL SISTEMA ---
 if __name__ == '__main__':
@@ -169,5 +203,5 @@ if __name__ == '__main__':
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, buscar_cancion))
     bot_app.add_handler(CallbackQueryHandler(manejar_botones))
-    print("Bot de Lyrics y Significados Iniciado con Éxito...")
+    print("Bot de Lyrics Premium Iniciado...")
     bot_app.run_polling()
