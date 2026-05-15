@@ -1,207 +1,158 @@
 import os
-import threading
+import time
+import feedparser
+import subprocess
 import requests
+import threading
+import json
 import re
-from bs4 import BeautifulSoup
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-TOKEN_TELEGRAM = os.getenv("TELEGRAM_BOT_TOKEN")
-
-# --- SERVIDOR WEB PARA RENDER ---
+# --- SERVIDOR WEB ---
 app = Flask('')
 @app.route('/')
-def home(): 
-    return "Bot de Lyrics con Diseño Premium Activo!"
+def home(): return "Bot MLB Multibatazo está Vivo y Escuchando!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- EL RASTREADOR DE LETRAS.COM (Versión 3.1 - HTML Fix) ---
+# --- CONFIGURACIÓN ---
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CANAL = os.getenv("TELEGRAM_CHANNEL_ID") 
+URL_CANAL = "https://t.me/homerunsmlb" 
+RSS_URL = "https://nitter.net/MLBHRVIDEOS/rss" 
 
-def limpiar_para_url(texto):
-    texto = re.sub(r'\(.*?\)|\[.*?\]', '', texto)
-    texto = re.sub(r'[^\w\s]', '', texto)
-    texto = re.sub(r'\s+', '-', texto.strip().lower())
-    return texto
+def formatear_titulo_personalizado(texto_original):
+    patron = r"^(.*?)\s*-\s*(.*?)\s*\((\d+)\)"
+    match = re.search(patron, texto_original)
+    if match:
+        jugador = match.group(1).strip()
+        equipo = match.group(2).strip()
+        numero = int(match.group(3))
+        sufijo = 'th' if 11 <= (numero % 100) <= 13 else {1:'st', 2:'nd', 3:'rd'}.get(numero % 10, 'th')
+        hashtag_equipo = equipo.replace(" ", "")
+        return f"{jugador} {numero}{sufijo} Home Run of the Season #{hashtag_equipo} #MLB"
+    return f"{texto_original} #MLB"
 
-def extraer_significado_letras(artista, cancion):
+def enriquecer_con_statcast(texto_tweet):
+    titulo = formatear_titulo_personalizado(texto_tweet)
     try:
-        art_fmt = limpiar_para_url(artista)
-        can_fmt = limpiar_para_url(cancion)
-        
-        url_significado = f"https://www.letras.com/{art_fmt}/{can_fmt}/significado.html"
-        url_principal = f"https://www.letras.com/{art_fmt}/{can_fmt}/"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
+        schedule_url = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
+        data = requests.get(schedule_url).json()
+        if 'dates' in data and len(data['dates']) > 0:
+            for game in data['dates'][0]['games']:
+                pbp = requests.get(f"https://statsapi.mlb.com/api/v1.1/game/{game['gamePk']}/feed/live").json()
+                plays = pbp.get('liveData', {}).get('plays', {}).get('allPlays', [])
+                for play in plays:
+                    if play.get('result', {}).get('event', '') == 'Home Run':
+                        if play['matchup']['batter']['fullName'].lower() in texto_tweet.lower():
+                            h = play.get('playEvents', [])[-1].get('hitData', {})
+                            p = play.get('playEvents', [])[-1].get('pitchData', {})
+                            return (f"{titulo}\n\n"
+                                    f"Distance: {h.get('totalDistance', 'N/A')}ft\n"
+                                    f"Exit Velocity: {h.get('launchSpeed', 'N/A')} MPH\n"
+                                    f"Launch Angle: {h.get('launchAngle', 'N/A')}°\n"
+                                    f"Pitch: {p.get('startSpeed', 'N/A')}mph {p.get('details', {}).get('type', {}).get('description', 'Unk')} "
+                                    f"({play['matchup']['pitcher']['fullName']})")
+    except: pass
+    return titulo
+
+def descargar_video_hd(url, identificador_unico=""):
+    archivo = f"video_{int(time.time())}_{identificador_unico}.mp4"
+    comando = ["yt-dlp", "-f", "best[ext=mp4][height<=720]/best[ext=mp4]/best", "--no-warnings", "-o", archivo, url]
+    try:
+        subprocess.run(comando, check=True)
+        return archivo
+    except: return None
+
+# MODIFICACIÓN: Ahora recibe el chat_id como parámetro para saber a quién enviarlo (Canal o Usuario)
+def enviar_a_telegram(ruta_video, texto, chat_id_destino):
+    url_api = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
+    teclado = {"inline_keyboard": [[{"text": "HOMERUNS MLB", "url": URL_CANAL}]]}
+    with open(ruta_video, 'rb') as video:
+        datos = {
+            "chat_id": chat_id_destino, "caption": texto, "reply_markup": json.dumps(teclado),
+            "supports_streaming": True, "width": 1280, "height": 720
         }
-        
-        res = requests.get(url_significado, headers=headers, timeout=10)
-        
-        if res.status_code == 404:
-            res = requests.get(url_principal, headers=headers, timeout=10)
-        
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, 'html.parser')
-            significado_texto = ""
-            
-            titulos = soup.find_all(['h1', 'h2', 'h3', 'h4'])
-            for tag in titulos:
-                texto_tag = tag.text.lower()
-                if 'significado' in texto_tag or 'meaning' in texto_tag or cancion.lower() in texto_tag:
-                    hermanos = tag.find_next_siblings(['p', 'div'])
-                    for hermano in hermanos:
-                        texto_limpio = hermano.text.strip()
-                        if len(texto_limpio) > 40:
-                            significado_texto += texto_limpio + "\n\n"
-                    if significado_texto:
-                        break
+        requests.post(url_api, data=datos, files={"video": video})
 
-            if not significado_texto:
-                parrafos = soup.find_all('p')
-                for p in parrafos:
-                    if len(p.text.strip()) > 100:
-                        significado_texto += p.text.strip() + "\n\n"
-
-            if significado_texto:
-                return significado_texto[:3800].strip()
-            else:
-                return "Pude entrar a la página, pero no hay un significado redactado para esta canción. 🚧"
-        elif res.status_code == 404:
-            return f"Error 404. Letras.com no tiene un análisis para '{cancion}'."
-        else:
-            return f"Error {res.status_code}. Conexión bloqueada temporalmente."
+# --- RADAR AUTOMÁTICO DE FONDO ---
+def bot_loop():
+    print("Bot MLB Multibatazo Iniciado en Segundo Plano...")
+    feed_inicial = feedparser.parse(RSS_URL)
+    ultimo_link_procesado = feed_inicial.entries[0].link if feed_inicial.entries else None
+    
+    while True:
+        try:
+            feed = feedparser.parse(RSS_URL)
+            nuevos_items = []
             
+            for entry in feed.entries:
+                if entry.link == ultimo_link_procesado:
+                    break
+                nuevos_items.append(entry)
+            
+            for item in reversed(nuevos_items):
+                link_x = item.link.replace("nitter.net", "x.com")
+                texto_base = item.title.replace("R to @MLBHRVIDEOS: ", "")
+                
+                print(f"Procesando nuevo jonrón para el canal: {texto_base}")
+                texto_final = enriquecer_con_statcast(texto_base)
+                video = descargar_video_hd(link_x, "canal")
+                
+                if video and os.path.exists(video):
+                    enviar_a_telegram(video, texto_final, CANAL) # Envía al canal
+                    os.remove(video)
+                    ultimo_link_procesado = item.link
+                    time.sleep(5)
+        except Exception as e:
+            print(f"Error en el loop: {e}")
+            
+        time.sleep(300)
+
+# --- COMANDOS INTERACTIVOS ---
+def procesar_ultimo_homerun_usuario(chat_id):
+    try:
+        feed = feedparser.parse(RSS_URL)
+        if feed.entries:
+            item = feed.entries[0] # Siempre agarramos el índice 0 (el más reciente)
+            link_x = item.link.replace("nitter.net", "x.com")
+            texto_base = item.title.replace("R to @MLBHRVIDEOS: ", "")
+            
+            texto_final = enriquecer_con_statcast(texto_base)
+            video = descargar_video_hd(link_x, "privado")
+            
+            if video and os.path.exists(video):
+                enviar_a_telegram(video, texto_final, chat_id) # Te lo envía directo a ti
+                os.remove(video)
     except Exception as e:
-        return f"Hubo un error técnico raspando la web: {e}"
-
-# --- LÓGICA DE TELEGRAM ---
+        print(f"Error sirviendo el homerun por comando: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    nombre = update.effective_user.first_name
-    
-    # Diseño Premium usando HTML y líneas
-    mensaje = (
-        f"¡Hola <b>{nombre}</b>! Bienvenido al bot 🎵\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "<b>Lyrics & Meaning Hub</b> es tu herramienta definitiva creada por @JoshHSmith. "
-        "Busca cualquier canción para obtener su letra completa y extraer el análisis profundo "
-        "directamente desde Letras.com.\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔍 <i>Escribe el nombre de un artista o canción para empezar.</i>"
+    # 1. Mensaje instantáneo confirmando que el bot está activo
+    await update.message.reply_text(
+        "✅ <b>¡El radar de Grandes Ligas está LIVE!</b>\n\n"
+        "⏳ <i>Buscando y descargando la repetición del último bambinazo para ti...</i>", 
+        parse_mode="HTML"
     )
-    await update.message.reply_text(mensaje, parse_mode="HTML")
-
-async def buscar_cancion(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text
-    espera = await update.message.reply_text("⏳ <i>Buscando en la base de datos...</i>", parse_mode="HTML")
     
-    try:
-        respuesta = requests.get(f"https://lrclib.net/api/search?q={query}").json()
-        if not respuesta:
-            await espera.edit_text("No encontré nada. Intenta escribir 'Artista - Canción'.")
-            return
+    # 2. Iniciamos el proceso pesado (descarga) en un hilo aparte para no bloquear Telegram
+    chat_id_usuario = update.message.chat_id
+    threading.Thread(target=procesar_ultimo_homerun_usuario, args=(chat_id_usuario,), daemon=True).start()
 
-        botones = []
-        paleta = ['🔴', '🔵', '🟢', '🟡', '🟣', '🟠', '🎸', '🎹', '🎤', '🎧']
-        
-        for i, song in enumerate(respuesta[:10]):
-            if song.get('plainLyrics'):
-                color = paleta[i % len(paleta)]
-                label = f"{color} {song['trackName']} - {song['artistName']}"[:60]
-                botones.append([InlineKeyboardButton(label, callback_data=f"ly_{song['id']}")])
-        
-        if not botones:
-            await espera.edit_text("Encontré la canción pero no tiene letra disponible. 😕")
-            return
-
-        # Menú de selección con estética
-        texto_menu = (
-            "<b>Resultados Encontrados</b> 💿\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "Elige la pista correcta de la lista para ver la letra:"
-        )
-        await espera.edit_text(texto_menu, reply_markup=InlineKeyboardMarkup(botones), parse_mode="HTML")
-    except Exception as e:
-        print(f"Error: {e}")
-        await espera.edit_text("Hubo un error de conexión con la base de datos.")
-
-async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    
-    await query.answer()
-
-    if data.startswith("ly_"):
-        song_id = data.split("_")[1]
-        await query.edit_message_text("⏳ <i>Descargando letra...</i>", parse_mode="HTML")
-        
-        try:
-            cancion = requests.get(f"https://lrclib.net/api/get/{song_id}").json()
-            titulo = cancion.get('trackName', 'Desconocido')
-            artista = cancion.get('artistName', 'Desconocido')
-            letra = cancion.get('plainLyrics', 'No disponible.')
-            
-            # Formato tipo tarjeta de Spotify
-            texto_final = (
-                f"🎵 <b>{titulo}</b>\n"
-                f"👤 <b>{artista}</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"{letra[:3600]}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                "<i>¿Qué inspiró esta canción? Descúbrelo abajo 👇</i>"
-            )
-            
-            # Botón de significado con formato llamativo y un botón de cierre
-            btns = [
-                [InlineKeyboardButton("🔥 Extraer Significado (Letras.com) 🔥", callback_data=f"mn_{song_id}")],
-                [InlineKeyboardButton("🔍 Buscar otra canción", callback_data="nueva_busqueda")]
-            ]
-            
-            await query.edit_message_text(texto_final, reply_markup=InlineKeyboardMarkup(btns), parse_mode="HTML")
-        except Exception as e:
-            print(f"Error cargando letra: {e}")
-            await query.edit_message_text("❌ Error al cargar la letra completa.")
-
-    elif data.startswith("mn_"):
-        song_id = data.split("_")[1]
-        await query.edit_message_text("🔎 <i>Viajando a Letras.com...</i>", parse_mode="HTML")
-        
-        try:
-            cancion = requests.get(f"https://lrclib.net/api/get/{song_id}").json()
-            artista = cancion.get('artistName', '')
-            titulo = cancion.get('trackName', '')
-            
-            significado = extraer_significado_letras(artista, titulo)
-            
-            # Resultado final con HTML
-            texto_significado = (
-                f"🧠 <b>Análisis de: {titulo}</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"{significado}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                "<i>Fuente: Letras.com</i>"
-            )
-            
-            await query.edit_message_text(texto_significado, parse_mode="HTML")
-        except Exception as e:
-            print(f"Error sacando significado: {e}")
-            await query.edit_message_text("❌ Ocurrió un error consultando la página.")
-
-    # Si el usuario presiona "Buscar otra canción"
-    elif data == "nueva_busqueda":
-        await query.edit_message_text("¡Listo! Escribe el nombre de otra canción para empezar de nuevo.")
-
-# --- ARRANQUE DEL SISTEMA ---
-if __name__ == '__main__':
+if __name__ == "__main__":
+    # Movemos el servidor web a un hilo para que no bloquee el código principal
     threading.Thread(target=run_web_server, daemon=True).start()
-    bot_app = Application.builder().token(TOKEN_TELEGRAM).build()
+    
+    # Arrancamos el radar de posteos automáticos en otro hilo
+    threading.Thread(target=bot_loop, daemon=True).start()
+    
+    # El hilo principal se encarga de escuchar los comandos de Telegram
+    bot_app = Application.builder().token(TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, buscar_cancion))
-    bot_app.add_handler(CallbackQueryHandler(manejar_botones))
-    print("Bot de Lyrics Premium Iniciado...")
+    
+    print("Sistema activo. Esperando comandos...")
     bot_app.run_polling()
