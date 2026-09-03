@@ -19,7 +19,7 @@ def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- EL RASTREADOR DE LETRAS.COM (Versión 3.1 - HTML Fix) ---
+# --- EL RASTREADOR DE LETRAS.COM (Actualizado y Optimizado) ---
 
 def limpiar_para_url(texto):
     texto = re.sub(r'\(.*?\)|\[.*?\]', '', texto)
@@ -41,38 +41,44 @@ def extraer_significado_letras(artista, cancion):
         }
         
         res = requests.get(url_significado, headers=headers, timeout=10)
-        
-        if res.status_code == 404:
+        if res.status_code != 200:
             res = requests.get(url_principal, headers=headers, timeout=10)
-        
+            
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             significado_texto = ""
             
-            titulos = soup.find_all(['h1', 'h2', 'h3', 'h4'])
-            for tag in titulos:
-                texto_tag = tag.text.lower()
-                if 'significado' in texto_tag or 'meaning' in texto_tag or cancion.lower() in texto_tag:
-                    hermanos = tag.find_next_siblings(['p', 'div'])
-                    for hermano in hermanos:
-                        texto_limpio = hermano.text.strip()
-                        if len(texto_limpio) > 40:
-                            significado_texto += texto_limpio + "\n\n"
-                    if significado_texto:
-                        break
-
+            # 1. Búsqueda por clases específicas de Letras.com
+            contenedores = soup.find_all('div', class_=re.compile(r'meaning|significado|article', re.I))
+            if contenedores:
+                for contenedor in contenedores:
+                    parrafos = contenedor.find_all('p')
+                    for p in parrafos:
+                        if len(p.text.strip()) > 40:
+                            significado_texto += p.text.strip() + "\n\n"
+                            
+            # 2. Búsqueda por títulos
             if not significado_texto:
-                parrafos = soup.find_all('p')
-                for p in parrafos:
-                    if len(p.text.strip()) > 100:
-                        significado_texto += p.text.strip() + "\n\n"
+                titulos = soup.find_all(['h1', 'h2', 'h3', 'h4'])
+                for tag in titulos:
+                    texto_tag = tag.text.lower()
+                    if 'significado' in texto_tag or 'meaning' in texto_tag or 'historia' in texto_tag:
+                        hermano = tag.find_next_sibling()
+                        while hermano and hermano.name in ['p', 'div', 'br']:
+                            texto_limpio = hermano.text.strip()
+                            if len(texto_limpio) > 40:
+                                significado_texto += texto_limpio + "\n\n"
+                            hermano = hermano.find_next_sibling()
+                        if significado_texto:
+                            break
 
             if significado_texto:
                 return significado_texto[:3800].strip()
             else:
-                return "Pude entrar a la página, pero no hay un significado redactado para esta canción. 🚧"
+                return "Pude entrar a la página, pero la estructura no tiene un análisis redactado. 🚧"
+                
         elif res.status_code == 404:
-            return f"Error 404. Letras.com no tiene un análisis para '{cancion}'."
+            return f"Error 404. Letras.com no tiene un registro para '{cancion}'."
         else:
             return f"Error {res.status_code}. Conexión bloqueada temporalmente."
             
@@ -84,7 +90,6 @@ def extraer_significado_letras(artista, cancion):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nombre = update.effective_user.first_name
     
-    # Diseño Premium usando HTML y líneas
     mensaje = (
         f"¡Hola <b>{nombre}</b>! Bienvenido al bot 🎵\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -119,7 +124,6 @@ async def buscar_cancion(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await espera.edit_text("Encontré la canción pero no tiene letra disponible. 😕")
             return
 
-        # Menú de selección con estética
         texto_menu = (
             "<b>Resultados Encontrados</b> 💿\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -146,7 +150,6 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
             artista = cancion.get('artistName', 'Desconocido')
             letra = cancion.get('plainLyrics', 'No disponible.')
             
-            # Formato tipo tarjeta de Spotify
             texto_final = (
                 f"🎵 <b>{titulo}</b>\n"
                 f"👤 <b>{artista}</b>\n"
@@ -156,7 +159,6 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "<i>¿Qué inspiró esta canción? Descúbrelo abajo 👇</i>"
             )
             
-            # Botón de significado con formato llamativo y un botón de cierre
             btns = [
                 [InlineKeyboardButton("🔥 Extraer Significado (Letras.com) 🔥", callback_data=f"mn_{song_id}")],
                 [InlineKeyboardButton("🔍 Buscar otra canción", callback_data="nueva_busqueda")]
@@ -178,7 +180,6 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             significado = extraer_significado_letras(artista, titulo)
             
-            # Resultado final con HTML
             texto_significado = (
                 f"🧠 <b>Análisis de: {titulo}</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -192,7 +193,6 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"Error sacando significado: {e}")
             await query.edit_message_text("❌ Ocurrió un error consultando la página.")
 
-    # Si el usuario presiona "Buscar otra canción"
     elif data == "nueva_busqueda":
         await query.edit_message_text("¡Listo! Escribe el nombre de otra canción para empezar de nuevo.")
 
